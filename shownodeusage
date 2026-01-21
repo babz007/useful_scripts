@@ -278,6 +278,29 @@ for jobid in $(squeue -h -w "$nodename" -o "%i"); do
     fi
     done <<< "$raw_output"
 
+    # ---------- normalize job id for scontrol to handle arrays-style ids ----------
+    jobid_for_ps="$jobid"
+
+    # For array-style ids like 276522_1, resolve to the internal numeric JobId
+    # that Slurm uses for steps on the compute node.
+    if [[ "$jobid_for_ps" =~ ^[0-9]+_[0-9]+$ ]]; then
+      resolved_id=$(
+        scontrol show job "$jobid_for_ps" 2>/dev/null | awk '
+          /JobId=/ {
+            for (i = 1; i <= NF; i++) {
+              if ($i ~ /^JobId=/) {
+                sub(/^JobId=/, "", $i);
+                print $i;
+                exit;
+              }
+            }
+          }'
+      )
+      if [[ -n "$resolved_id" ]]; then
+        jobid_for_ps="$resolved_id"
+      fi
+    fi
+
     # ---------- find processes information (trim node names, robust parsing) ----------
     # make sure these associative arrays exist (declare these near the top of your script)
     # declare -A NODE_PROCESSES PROC_CPU PROC_MEM PROC_GPUS PROC_CMD NODE_TOTAL_CPU NODE_TOTAL_MEM
@@ -291,15 +314,15 @@ for jobid in $(squeue -h -w "$nodename" -o "%i"); do
     # run remote command (if it fails, we continue with empty output)
     if [[ "$user" == "$USER" ]]; then
       if [[ -v NODE_GPUS[$node_name] && -n "${NODE_GPUS[$node_name]// }" ]]; then
-        output=$(timeout 60s srun --jobid="$jobid" --overlap bash -c "showjobprocessesusage $jobid 1" 2>/dev/null || true)
+        output=$(timeout 60s srun --jobid="$jobid_for_ps" --overlap bash -c "showjobprocessesusage $jobid_for_ps 1" 2>/dev/null || true)
       else
-        output=$(timeout 60s srun --jobid="$jobid" --overlap bash -c "showjobprocessesusage $jobid 0" 2>/dev/null || true)
+        output=$(timeout 60s srun --jobid="$jobid_for_ps" --overlap bash -c "showjobprocessesusage $jobid_for_ps 0" 2>/dev/null || true)
       fi
     else
       if [[ -v NODE_GPUS[$node_name] && -n "${NODE_GPUS[$node_name]// }" ]]; then
-        output=$(timeout 60s ssh "$node_name" "showjobprocessesusage $jobid 1" 2>/dev/null || true)
+        output=$(timeout 60s ssh "$node_name" "showjobprocessesusage $jobid_for_ps 1" 2>/dev/null || true)
       else
-        output=$(timeout 60s ssh "$node_name" "showjobprocessesusage $jobid 0" 2>/dev/null || true)
+        output=$(timeout 60s ssh "$node_name" "showjobprocessesusage $jobid_for_ps 0" 2>/dev/null || true)
       fi
     fi
     
@@ -340,7 +363,7 @@ for jobid in $(squeue -h -w "$nodename" -o "%i"); do
     # === GPU stats collection ===
     if [[ -v NODE_GPUS[$node_name] && -n "${NODE_GPUS[$node_name]// }" ]]; then
         if [[ "$user" == "$USER" ]]; then
-          nvidia_out=$(timeout 60s srun --jobid="$jobid" --overlap bash -c \
+          nvidia_out=$(timeout 60s srun --jobid="$jobid_for_ps" --overlap bash -c \
             "nvidia-smi --query-gpu=index,memory.total,memory.used,utilization.gpu \
              --format=csv,noheader,nounits" 2>/dev/null || true)
         else
